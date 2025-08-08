@@ -45,7 +45,7 @@ class AccountMove(models.Model):
             base = inv_part
 
         # keep it reasonable length
-        return base[:180] or f"INVOICE-{self.id}"
+        return "TEST__" + base[:180] or f"INVOICE-{self.id}"
 
     # --- hook used by ir.actions.report ---
     def _get_report_base_filename(self):
