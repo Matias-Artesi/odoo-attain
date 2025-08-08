@@ -47,10 +47,10 @@ class AccountMove(models.Model):
         # keep it reasonable length
         return base[:180] or f"INVOICE-{self.id}"
 
-# --- hook used by ir.actions.report ---
-def _get_report_base_filename(self):
-    self.ensure_one()
-    if self.move_type in ('out_invoice', 'out_refund'):
-        return self._compose_invoice_filename()
-    return super()._get_report_base_filename()
+    # --- hook used by ir.actions.report ---
+    def _get_report_base_filename(self):
+        self.ensure_one()
+        if self.move_type in ('out_invoice', 'out_refund'):
+            return self._compose_invoice_filename()
+        return super()._get_report_base_filename()
 
