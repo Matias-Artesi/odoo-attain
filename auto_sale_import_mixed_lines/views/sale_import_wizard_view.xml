@@ -1,0 +1,42 @@
+<odoo>
+    <record id="view_sale_import_wizard" model="ir.ui.view">
+        <field name="name">sale.import.wizard.form</field>
+        <field name="model">sale.import.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Importar Ventas">
+                <sheet>
+                    <group>
+                        <field name="file" filename="file_name"/>
+                        <field name="file_name" invisible="1"/>
+                    </group>
+                    <group>
+                        <field name="service_product_id" options="{'no_open': True}"/>
+                        <field name="validate_invoice"/>
+                        <field name="simulate"/>
+                        <field name="cancel_all_on_errors"/>
+                    </group>
+                    <group>
+                        <field name="result_summary" nolabel="1" readonly="1" widget="text" colspan="4"/>
+                    </group>
+                </sheet>
+                <footer>
+                    <button name="action_import_sales" string="Procesar" type="object" class="btn-primary"/>
+                    <button string="Cancelar" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_sale_import_wizard" model="ir.actions.act_window">
+        <field name="name">Importar Ventas</field>
+        <field name="res_model">sale.import.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <menuitem id="menu_sale_import_wizard"
+              name="Importar Ventas"
+              parent="sale.sale_order_menu"
+              action="action_sale_import_wizard"
+              sequence="100"/>
+</odoo>
