@@ -1,4 +1,3 @@
-# models/sale_order.py
 from odoo import models, fields, api
 
 class SaleOrder(models.Model):
@@ -7,23 +6,26 @@ class SaleOrder(models.Model):
     invoice_date_import = fields.Date(string="Fecha de Factura (importación)")
 
     def _validate_outgoing_pickings(self):
+        """Valida pickings de salida sin depender de modelos wizard explícitos.
+        Usa qty_done en move lines vía write() y procesa cualquier wizard devuelto por button_validate().
+        """
         for picking in self.picking_ids.filtered(lambda p: p.picking_type_code == 'outgoing' and p.state not in ('done', 'cancel')):
             # 1) Intentar reservar
             picking.action_assign()
 
-            # 2) Completar qty_done si hace falta (para evitar wizard)
+            # 2) Completar qty_done en las líneas (stock.move.line) sin leer atributos inexistentes
             for move in picking.move_ids_without_package:
-                # Si el producto requiere lote/serie, conviene NO automatizar sin datos de lote
+                # Si el producto requiere lote/serie, mejor no automatizar (sin datos de lote). Lo reportás aparte si querés.
                 if move.product_id.tracking != 'none':
-                    # Podés registrar un error aquí y saltar
                     continue
 
                 if move.move_line_ids:
                     for ml in move.move_line_ids:
-                        if not ml.qty_done:
-                            ml.qty_done = ml.reserved_uom_qty or ml.product_uom_qty or move.product_uom_qty
+                        qty_line = ml.reserved_uom_qty or getattr(ml, 'product_uom_qty', 0.0) or move.product_uom_qty
+                        # setear sin leer ml.qty_done -> evita AttributeError en tu entorno
+                        ml.write({'qty_done': qty_line})
                 else:
-                    # Sin move lines: creamos una línea con la cantidad total pedida
+                    # Crear una move line completa con la cantidad pedida
                     self.env['stock.move.line'].create({
                         'move_id': move.id,
                         'product_id': move.product_id.id,
@@ -37,12 +39,13 @@ class SaleOrder(models.Model):
             # 3) Validar
             res = picking.button_validate()
 
-            # 4) Si hay wizard (immediate/backorder), procesarlo
+            # 4) Si aparece un wizard (inmediate/backorder), procesarlo de forma genérica
             if isinstance(res, dict):
-                model = res.get('res_model')
+                res_model = res.get('res_model')
                 res_id = res.get('res_id')
-                if model and res_id:
-                    wiz = self.env[model].browse(res_id)
+                if res_model and res_id:
+                    wiz = self.env[res_model].browse(res_id)
+                    # ambos wizards en v17 implementan 'process'; algunos tienen además 'process_cancel_backorder'
                     if hasattr(wiz, 'process'):
                         wiz.process()
                     elif hasattr(wiz, 'process_cancel_backorder'):
