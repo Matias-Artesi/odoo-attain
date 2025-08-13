@@ -226,7 +226,12 @@ class SaleImportWizard(models.TransientModel):
                         desc = self._norm_str(row.get('order_line/product_id/name'))
 
                         if default_code:
-                            product = self.env['product.product'].search([('default_code', '=', default_code)], limit=1)
+                            Product = self.env['product.product'].with_company(company.id)
+                            product = Product.search([
+                                ('default_code', '=', default_code),
+                                '|', ('company_id', '=', company.id), ('company_id', '=', False),
+                            ], limit=1)
+
                             if not product:
                                 errors.append(f"{order_name}: Producto no encontrado - código: {default_code}")
                                 continue
