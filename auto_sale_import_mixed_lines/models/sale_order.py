@@ -6,59 +6,62 @@ class SaleOrder(models.Model):
     invoice_date_import = fields.Date(string="Fecha de Factura (importación)")
 
     def _validate_outgoing_pickings(self):
-        """Valida entregas de salida sin depender de atributos inexistentes.
-        Carga qty_done en move lines con la cantidad planificada y procesa cualquier wizard devuelto.
+        """Valida entregas de salida marcando qty_done en move lines con la cantidad planificada del move.
+        No depende de atributos frágiles en move lines y procesa cualquier wizard que devuelva button_validate().
         """
         for picking in self.picking_ids.filtered(lambda p: p.picking_type_code == 'outgoing' and p.state not in ('done', 'cancel')):
-            # 1) Intentar reservar (si hay stock disponible/ubicaciones correctas)
+            # 1) Intentar reservar (no es obligatorio, pero ayuda si hay stock)
             picking.action_assign()
 
-            # 2) Completar qty_done en las move lines
+            # 2) Completar qty_done sin leer campos no estándar en move lines
             for move in picking.move_ids_without_package:
-                # Si tu flujo no usa lotes/series, omitimos automatizar esos productos
+                # Si en tu flujo no usás lotes/series, OMITIMOS esos productos por seguridad
                 if move.product_id.tracking != 'none':
                     continue
 
+                planned_qty = move.product_uom_qty or 0.0
+
                 if move.move_line_ids:
-                    # Seteamos qty_done = cantidad planificada de cada línea
-                    for ml in move.move_line_ids:
-                        # product_uom_qty existe en move line en v17
-                        qty_line = ml.product_uom_qty or move.product_uom_qty or 0.0
-                        ml.write({'qty_done': qty_line})
+                    # Ponemos toda la cantidad planificada en la primera línea
+                    first_ml = move.move_line_ids[:1]
+                    first_ml.write({'qty_done': planned_qty})
+                    # Opcional: aseguramos 0.0 en el resto
+                    others = move.move_line_ids - first_ml
+                    if others:
+                        others.write({'qty_done': 0.0})
                 else:
-                    # Sin move lines: creamos una con todo el movimiento
+                    # Si no hay líneas, creamos una con toda la cantidad planificada
                     self.env['stock.move.line'].create({
                         'move_id': move.id,
-                        'product_id': move.product_id.id,
                         'picking_id': picking.id,
+                        'product_id': move.product_id.id,
                         'location_id': move.location_id.id,
                         'location_dest_id': move.location_dest_id.id,
                         'product_uom_id': move.product_uom.id,
-                        'qty_done': move.product_uom_qty,
+                        'qty_done': planned_qty,
                     })
 
             # 3) Validar el picking
             res = picking.button_validate()
 
-            # 4) Si Odoo devuelve un wizard (inmediata / backorder), procesarlo genéricamente
+            # 4) Si Odoo devuelve un wizard (inmediata/backorder), procesarlo sin suposiciones
             if isinstance(res, dict):
                 model = res.get('res_model')
                 res_id = res.get('res_id')
                 if model and res_id:
                     wiz = self.env[model].browse(res_id)
-                    # En v17, ambos wizards implementan 'process'; algunos también 'process_cancel_backorder'
-                    if hasattr(wiz, 'process'):
-                        wiz.process()
-                    elif hasattr(wiz, 'process_cancel_backorder'):
-                        wiz.process_cancel_backorder()
+                    for method in ('process', 'process_cancel_backorder', 'action_validate'):
+                        if hasattr(wiz, method):
+                            getattr(wiz, method)()
+                            break
 
     @api.model
     def create(self, vals):
         order = super().create(vals)
         if self.env.context.get('auto_invoice_on_import'):
-            # Confirmar venta => Odoo genera automáticamente el/los pickings
+            # Confirmar venta -> genera pickings/moves
             order.action_confirm()
-            # Validar entregas de forma robusta
+            # Validar entregas de salida
             order._validate_outgoing_pickings()
             # Crear factura en borrador
             invoice = order._create_invoices()
