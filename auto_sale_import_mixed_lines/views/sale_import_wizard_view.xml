@@ -9,7 +9,7 @@
                     <field name="file_name" invisible="1"/>
                 </group>
                 <group>
-                    <field name="service_product_id" options="{'no_create': False}"/>
+                    <field name="service_product_id" options="{'no_open': True, 'no_create': True}"/>
                     <field name="validate_invoice"/>
                     <field name="simulate"/>
                     <field name="abort_on_errors"/>
