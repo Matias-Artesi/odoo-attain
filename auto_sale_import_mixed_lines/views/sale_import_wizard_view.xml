@@ -4,24 +4,22 @@
         <field name="model">sale.import.wizard</field>
         <field name="arch" type="xml">
             <form string="Importar Ventas">
-                <sheet>
-                    <group>
-                        <field name="file" filename="file_name"/>
-                        <field name="file_name" invisible="1"/>
-                    </group>
-                    <group>
-                        <field name="service_product_id" options="{'no_open': True}"/>
-                        <field name="validate_invoice"/>
-                        <field name="simulate"/>
-                        <field name="cancel_all_on_errors"/>
-                    </group>
-                    <group>
-                        <field name="result_summary" nolabel="1" readonly="1" widget="text" colspan="4"/>
-                    </group>
-                </sheet>
+                <group>
+                    <field name="file" filename="file_name"/>
+                    <field name="file_name" invisible="1"/>
+                </group>
+                <group>
+                    <field name="service_product_id" options="{'no_create': False}"/>
+                    <field name="validate_invoice"/>
+                    <field name="simulate"/>
+                    <field name="abort_on_errors"/>
+                </group>
+                <group>
+                    <field name="result_summary" nolabel="1" readonly="1" widget="text"/>
+                </group>
                 <footer>
                     <button name="action_import_sales" string="Procesar" type="object" class="btn-primary"/>
-                    <button string="Cancelar" class="btn-secondary" special="cancel"/>
+                    <button string="Cerrar" class="btn-secondary" special="cancel"/>
                 </footer>
             </form>
         </field>
