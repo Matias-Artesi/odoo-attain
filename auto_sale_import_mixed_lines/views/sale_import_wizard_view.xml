@@ -7,15 +7,11 @@
                 <group>
                     <field name="file" filename="file_name"/>
                     <field name="file_name" invisible="1"/>
-                </group>
-                <group>
-                    <field name="service_product_id" options="{'no_open': True, 'no_create': True}"/>
+                    <field name="service_product_id"/>
                     <field name="validate_invoice"/>
                     <field name="simulate"/>
-                    <field name="abort_on_errors"/>
-                </group>
-                <group>
-                    <field name="result_summary" nolabel="1" readonly="1" widget="text"/>
+                    <field name="cancel_all_on_errors"/>
+                    <field name="result_summary" readonly="1" widget="text"/>
                 </group>
                 <footer>
                     <button name="action_import_sales" string="Procesar" type="object" class="btn-primary"/>
