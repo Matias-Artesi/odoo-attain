@@ -1,8 +1,11 @@
-from odoo import models, fields, api
-from odoo.exceptions import UserError
+from odoo import models, fields, api, exceptions, _
 import base64
-import pandas as pd
 from io import BytesIO
+
+try:
+    import pandas as pd
+except Exception:
+    pd = None
 
 class SaleImportWizard(models.TransientModel):
     _name = 'sale.import.wizard'
@@ -10,35 +13,96 @@ class SaleImportWizard(models.TransientModel):
 
     file = fields.Binary("Archivo Excel", required=True)
     file_name = fields.Char("Nombre del archivo")
-    service_product_id = fields.Many2one(
-        'product.product',
-        string="Producto servicio (líneas libres)",
-        help="Se usa para líneas sin default_code",
-        domain="[('type','=','service'),('sale_ok','=',True)]",
-    )
     validate_invoice = fields.Boolean("Validar factura automáticamente")
     simulate = fields.Boolean("Simulación (no guarda)")
     cancel_all_on_errors = fields.Boolean("Cancelar todo si hay errores", default=True)
+    service_product_id = fields.Many2one('product.product', string="Producto servicio (líneas libres)",
+                                         domain="[('detailed_type','=','service'),('sale_ok','=',True)]")
     result_summary = fields.Text("Resumen", readonly=True)
 
-    def _to_date(self, v):
-        if v is None or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, str) and not v.strip()):
-            return False
-        try:
-            return pd.to_datetime(v).date()
-        except Exception:
-            return False
-
     def _is_nan(self, v):
+        if v is None:
+            return True
         try:
-            return pd.isna(v)
+            import math
+            return isinstance(v, float) and math.isnan(v)
         except Exception:
             return False
 
-    def _action_show_self(self):
+    def _clean(self, v):
+        return None if self._is_nan(v) else v
+
+    def _get_company(self, val):
+        val = self._clean(val)
+        Company = self.env['res.company']
+        if not val:
+            return self.env.company
+        try:
+            cid = int(val)
+            comp = Company.browse(cid)
+            return comp if comp.exists() else False
+        except Exception:
+            pass
+        comp = Company.search([('name', '=', str(val))], limit=1)
+        if comp:
+            return comp
+        comp = Company.search([('partner_id.name', '=', str(val))], limit=1)
+        return comp or False
+
+    def _get_partner(self, val):
+        val = self._clean(val)
+        Partner = self.env['res.partner']
+        if not val:
+            return False
+        try:
+            pid = int(val)
+            p = Partner.browse(pid)
+            return p if p.exists() else False
+        except Exception:
+            pass
+        p = Partner.search([('name', '=', str(val))], limit=1)
+        if not p:
+            p = Partner.search([('ref', '=', str(val))], limit=1)
+        return p or False
+
+    def _to_date(self, val):
+        if not val or self._is_nan(val):
+            return False
+        if pd:
+            try:
+                return pd.to_datetime(val).date()
+            except Exception:
+                return False
+        try:
+            from datetime import datetime
+            if isinstance(val, str):
+                return datetime.strptime(val, "%Y-%m-%d").date()
+        except Exception:
+            return False
+        return False
+
+    def _get_tax_iva_21_sale(self, company):
+        Tax = self.env['account.tax'].with_company(company)
+        tax = Tax.search([
+            ('name', 'in', ['21%', 'IVA 21%']),
+            ('type_tax_use', '=', 'sale'),
+            ('company_id', 'in', [company.id, False]),
+        ], limit=1)
+        return tax
+
+    def _price_for_product(self, product, qty, partner):
+        pricelist = partner.property_product_pricelist if partner else False
+        if pricelist:
+            rule = pricelist._get_product_rule(product, qty, partner=partner)
+            if rule and 'price' in rule:
+                return rule['price']
+        return product.lst_price
+
+    def _reopen_self(self):
         return {
             'type': 'ir.actions.act_window',
-            'res_model': self._name,
+            'name': _("Importar Ventas"),
+            'res_model': 'sale.import.wizard',
             'view_mode': 'form',
             'res_id': self.id,
             'target': 'new',
@@ -47,195 +111,158 @@ class SaleImportWizard(models.TransientModel):
     def action_import_sales(self):
         self.ensure_one()
         if not self.file:
-            raise UserError("Subí un archivo Excel.")
-
-        # Leer Excel
+            raise exceptions.UserError(_("Subí un archivo primero."))
+        if pd is None:
+            raise exceptions.UserError(_("Este wizard requiere pandas. Agregá pandas y openpyxl al entorno o convertí a CSV."))
         try:
             data = base64.b64decode(self.file)
             df = pd.read_excel(BytesIO(data))
         except Exception as e:
-            self.result_summary = f"❌ No pude leer el archivo: {e}"
-            return self._action_show_self()
+            raise exceptions.UserError(_("No se pudo leer el Excel: %s") % e)
 
-        required_any = ['name', 'order_line/product_id/name', 'order_line/product_uom_qty']
-        missing_cols = [c for c in required_any if c not in df.columns]
-        if missing_cols:
-            self.result_summary = "❌ Faltan columnas obligatorias: " + ", ".join(missing_cols)
-            return self._action_show_self()
+        if 'name' not in df.columns:
+            raise exceptions.UserError(_("La columna 'name' (identificador de pedido) es obligatoria."))
 
-        # Agrupar filas por nombre de orden
+        for col in ['partner_id','company_id','date_order','invoice_date_import','journal_code']:
+            if col in df.columns:
+                df[col] = df[col].ffill()
+
+        grouped = {}
         errors = []
-        prepared = {}  # order_name -> {'header': {...}, 'lines': [vals]}
-
-        # Detectar si habrá líneas libres pero no se configuró producto servicio
-        has_free_lines = any((not str(row.get('default_code') or '').strip()) for _, row in df.iterrows())
-        if has_free_lines and not self.service_product_id:
-            errors.append("Hay líneas sin default_code pero no elegiste el 'Producto servicio (líneas libres)' en el wizard.")
-
-        # Pre-validación y preparación
-        for _, row in df.iterrows():
-            order_name = str(row.get('name') or '').strip()
-            if not order_name:
-                errors.append("Fila sin 'name' (número de orden).")
+        summary_lines = []
+        for idx, row in df.iterrows():
+            order_name = row.get('name')
+            if not order_name or (isinstance(order_name, float) and pd.isna(order_name)):
+                errors.append(f"Fila {idx+2}: sin 'name'.")
                 continue
+            grouped.setdefault(order_name, []).append(row)
 
-            group = prepared.setdefault(order_name, {'header': None, 'lines': []})
-            # Si no hay header aún, usar esta fila como cabecera
-            if not group['header']:
-                partner_id = row.get('partner_id')
-                company_id = row.get('company_id')
-                if self._is_nan(partner_id) or self._is_nan(company_id):
-                    errors.append(f"{order_name}: Falta 'partner_id' o 'company_id' en la primera fila del grupo.")
-                    # seguimos, pero esta orden no se podrá crear
-                header = {
-                    'partner_id': int(partner_id) if partner_id and not self._is_nan(partner_id) else None,
-                    'company_id': int(company_id) if company_id and not self._is_nan(company_id) else None,
-                    'date_order': self._to_date(row.get('date_order')),
-                    'invoice_date_import': self._to_date(row.get('invoice_date_import')),
-                    'journal_code': (str(row.get('journal_code')).strip() if not self._is_nan(row.get('journal_code')) else None),
-                    'name': order_name,
-                }
-                group['header'] = header
+        summary_lines.append(f"Órdenes detectadas: {len(grouped)}")
 
-            # Preparar línea
-            qty = row.get('order_line/product_uom_qty')
-            if self._is_nan(qty):
-                errors.append(f"{order_name}: Línea sin cantidad.")
-                continue
-            try:
-                qty = float(qty)
-            except Exception:
-                errors.append(f"{order_name}: Cantidad inválida '{qty}'.")
-                continue
-
-            default_code = str(row.get('default_code') or '').strip()
-            desc = str(row.get('order_line/product_id/name') or '').strip()
-            price_excel = row.get('price_unit')
-
-            if default_code:
-                # Producto stockable por default_code
-                product = self.env['product.product'].search([
-                    ('default_code', '=', default_code),
-                ], limit=1)
-                if not product:
-                    errors.append(f"{order_name}: Producto no encontrado por código '{default_code}'.")
-                    continue
-
-                line_vals = {
-                    'product_id': product.id,
-                    'product_uom_qty': qty,
-                }
-
-                if price_excel and not self._is_nan(price_excel):
-                    try:
-                        line_vals['price_unit'] = float(price_excel)
-                    except Exception:
-                        errors.append(f"{order_name}: price_unit inválido '{price_excel}' (código {default_code}).")
-                        continue
-                else:
-                    # Fallback simple al precio de lista del producto
-                    line_vals['price_unit'] = product.lst_price
-
-            else:
-                # Línea personalizada (servicio)
-                if not self.service_product_id:
-                    errors.append(f"{order_name}: Línea personalizada sin producto servicio configurado en el wizard.")
-                    continue
-                if not desc:
-                    errors.append(f"{order_name}: Línea personalizada sin descripción.")
-                    continue
-                if price_excel is None or self._is_nan(price_excel):
-                    errors.append(f"{order_name}: Línea personalizada '{desc}' sin price_unit.")
-                    continue
-                try:
-                    price_unit = float(price_excel)
-                except Exception:
-                    errors.append(f"{order_name}: price_unit inválido '{price_excel}' (línea personalizada).")
-                    continue
-
-                # Buscar IVA 21% ventas (por compañía o global)
-                company_id = group['header']['company_id']
-                tax = self.env['account.tax'].search([
-                    ('name', 'in', ['21%', 'IVA 21%']),
-                    ('type_tax_use', '=', 'sale'),
-                    ('company_id', 'in', [company_id, False]),
-                ], limit=1)
-
-                line_vals = {
-                    'product_id': self.service_product_id.id,
-                    'name': desc,
-                    'product_uom_qty': qty,
-                    'price_unit': price_unit,
-                    'tax_id': [(6, 0, [tax.id])] if tax else False,
-                }
-
-            group['lines'].append(line_vals)
-
-        # Simulación: mostrar resumen y salir
         if self.simulate:
-            lines = [f"Órdenes detectadas: {len(prepared)}"]
-            for name, data in prepared.items():
-                lines.append(f"- {name}: {len(data['lines'])} líneas válidas")
+            for order, lines in grouped.items():
+                summary_lines.append(f"- {order}: {len(lines)} líneas (simulación)")
             if errors:
-                lines.append("")
-                lines.append("Errores detectados:")
-                lines += [f"• {e}" for e in errors]
-            self.result_summary = "\n".join(lines)
-            return self._action_show_self()
+                summary_lines.append("Errores detectados:")
+                summary_lines.extend(errors)
+            self.result_summary = "\n".join(summary_lines)
+            return self._reopen_self()
 
-        # Si hay errores y se pidió cancelar todo, no crear nada
-        if errors and self.cancel_all_on_errors:
-            lines = ["❌ Importación cancelada por errores.", ""]
-            lines += ["Errores detectados:"] + [f"• {e}" for e in errors]
-            self.result_summary = "\n".join(lines)
-            return self._action_show_self()
+        try:
+            with self.env.cr.savepoint():
+                for order_name, lines in grouped.items():
+                    first = lines[0]
 
-        # Crear órdenes (solo para las que estén bien preparadas)
-        created = 0
-        for name, data in prepared.items():
-            header = data['header']
-            partner = self.env['res.partner'].browse(header['partner_id']) if header['partner_id'] else False
-            company = self.env['res.company'].browse(header['company_id']) if header['company_id'] else False
+                    partner = self._get_partner(first.get('partner_id'))
+                    if not partner:
+                        errors.append(f"{order_name}: partner_id inválido o no encontrado ({first.get('partner_id')}).")
+                        continue
 
-            if not partner or not company:
-                errors.append(f"{name}: No se pudo crear (partner o company faltante).")
-                continue
-            if not data['lines']:
-                errors.append(f"{name}: No tiene líneas válidas.")
-                continue
+                    company = self._get_company(first.get('company_id'))
+                    if not company:
+                        errors.append(f"{order_name}: company_id inválido o no encontrado ({first.get('company_id')}).")
+                        continue
 
-            order_vals = {
-                'name': name,
-                'partner_id': partner.id,
-                'company_id': company.id,
-                'date_order': header['date_order'],
-                'invoice_date_import': header['invoice_date_import'],
-                'order_line': [(0, 0, l) for l in data['lines']],
-            }
-            sale_order = self.env['sale.order'].with_context(auto_invoice_on_import=True).create(order_vals)
+                    iva21 = self._get_tax_iva_21_sale(company)
 
-            # Post-procesar factura
-            invoice = sale_order.invoice_ids[:1]
-            if invoice:
-                jcode = header.get('journal_code')
-                if jcode:
-                    journal = self.env['account.journal'].search([
-                        ('code', '=', jcode),
-                        ('type', '=', 'sale'),
-                        ('company_id', '=', company.id),
-                    ], limit=1)
-                    if journal:
-                        invoice.journal_id = journal.id
-                if self.validate_invoice:
-                    invoice.action_post()
+                    order_lines = []
+                    for ln in lines:
+                        default_code = self._clean(ln.get('default_code'))
+                        descr = self._clean(ln.get('order_line/product_id/name'))
+                        qty = ln.get('order_line/product_uom_qty') or 1.0
+                        price_unit = self._clean(ln.get('price_unit'))
 
-            created += 1
+                        try:
+                            qty = float(qty)
+                        except Exception:
+                            qty = 1.0
+                        if qty <= 0:
+                            errors.append(f"{order_name}: cantidad inválida en línea '{descr}' (qty={qty}).")
+                            continue
 
-        # Resumen final
-        lines = [f"Órdenes detectadas: {len(prepared)}", f"Órdenes creadas: {created}"]
+                        if default_code:
+                            product = self.env['product.product'].search([('default_code','=',str(default_code))], limit=1)
+                            if not product:
+                                errors.append(f"{order_name}: producto no encontrado por default_code '{default_code}'.")
+                                continue
+                            line_vals = {
+                                'product_id': product.id,
+                                'product_uom': product.uom_id.id,
+                                'product_uom_qty': qty,
+                            }
+                            if price_unit is None:
+                                line_vals['price_unit'] = self._price_for_product(product, qty, partner)
+                            else:
+                                try:
+                                    line_vals['price_unit'] = float(price_unit)
+                                except Exception:
+                                    errors.append(f"{order_name}: price_unit inválido en línea de producto '{default_code}'.")
+                                    continue
+                        else:
+                            if not self.service_product_id:
+                                errors.append(f"{order_name}: hay líneas sin default_code y no seleccionaste 'Producto servicio (líneas libres)' en el wizard.")
+                                continue
+                            if not descr:
+                                errors.append(f"{order_name}: línea personalizada sin descripción.")
+                                continue
+                            if price_unit is None:
+                                errors.append(f"{order_name}: línea personalizada '{descr}' sin price_unit.")
+                                continue
+                            try:
+                                pu = float(price_unit)
+                            except Exception:
+                                errors.append(f"{order_name}: price_unit inválido en línea personalizada '{descr}'.")
+                                continue
+                            line_vals = {
+                                'product_id': self.service_product_id.id,
+                                'name': str(descr),
+                                'product_uom': self.service_product_id.uom_id.id,
+                                'product_uom_qty': qty,
+                                'price_unit': pu,
+                            }
+                            if iva21:
+                                line_vals['tax_id'] = [(6,0, iva21.ids)]
+                        order_lines.append((0,0,line_vals))
+
+                    if not order_lines:
+                        errors.append(f"{order_name}: no se agregaron líneas válidas.")
+                        continue
+
+                    date_order = self._to_date(first.get('date_order'))
+                    inv_date = self._to_date(first.get('invoice_date_import'))
+
+                    order_vals = {
+                        'name': str(order_name),
+                        'partner_id': partner.id,
+                        'company_id': company.id,
+                        'date_order': date_order,
+                        'invoice_date_import': inv_date,
+                        'order_line': order_lines,
+                    }
+
+                    sale = self.env['sale.order'].with_context(auto_invoice_on_import=True).create(order_vals)
+
+                    invoice = sale.invoice_ids[:1]
+                    if invoice:
+                        journal_code = self._clean(first.get('journal_code'))
+                        if journal_code:
+                            journal = self.env['account.journal'].with_company(company).search([('code','=',str(journal_code)), ('type','=','sale')], limit=1)
+                            if journal:
+                                invoice.journal_id = journal.id
+                        if self.validate_invoice:
+                            invoice.action_post()
+
+                if errors and self.cancel_all_on_errors:
+                    raise exceptions.UserError(_("Se detectaron errores, se canceló toda la importación:\n- ") + "\n- ".join(errors))
+        except exceptions.UserError as e:
+            summary_lines.append(str(e))
+            self.result_summary = "\n".join(summary_lines)
+            return self._reopen_self()
+
         if errors:
-            lines.append("")
-            lines.append("Errores (no bloqueantes):")
-            lines += [f"• {e}" for e in errors]
-        self.result_summary = "\n".join(lines)
-        return self._action_show_self()
+            summary_lines.append("Errores detectados:")
+            summary_lines.extend(errors)
+        else:
+            summary_lines.append("Importación completada sin errores.")
+        self.result_summary = "\n".join(summary_lines)
+        return self._reopen_self()
