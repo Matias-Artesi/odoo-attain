@@ -10,16 +10,11 @@ class SaleOrder(models.Model):
         sale_order = super().create(vals)
 
         if self.env.context.get('auto_invoice_on_import'):
-            # Confirmación de venta
             sale_order.action_confirm()
-
-            # Entrega inmediata incluso sin reservas
-            for picking in sale_order.picking_ids.filtered(lambda p: p.state not in ('done', 'cancel')):
+            for picking in sale_order.picking_ids.filtered(lambda p: p.state not in ['done', 'cancel']):
                 picking.action_assign()
-                imt = self.env['stock.immediate.transfer'].create({'pick_ids': [(4, picking.id)]})
-                imt.process()
-
-            # Crear factura en borrador
+                imd_transfer = self.env['stock.immediate.transfer'].create({'pick_ids': [(4, picking.id)]})
+                imd_transfer.process()
             invoice = sale_order._create_invoices()
             if invoice and sale_order.invoice_date_import:
                 invoice.invoice_date = sale_order.invoice_date_import
