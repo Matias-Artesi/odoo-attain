@@ -5,13 +5,17 @@
         <field name="arch" type="xml">
             <form string="Importar Ventas">
                 <group>
-                    <field name="file" filename="file_name"/>
+                    <field name="file" filename="file_name" required="1"/>
                     <field name="file_name" invisible="1"/>
-                    <field name="service_product_id"/>
+                    <field name="service_product_id" options="{'no_open': True}"/>
+                </group>
+                <group>
                     <field name="validate_invoice"/>
                     <field name="simulate"/>
                     <field name="cancel_all_on_errors"/>
-                    <field name="result_summary" readonly="1" widget="text"/>
+                </group>
+                <group>
+                    <field name="result_summary" nolabel="1" readonly="1" widget="text"/>
                 </group>
                 <footer>
                     <button name="action_import_sales" string="Procesar" type="object" class="btn-primary"/>
