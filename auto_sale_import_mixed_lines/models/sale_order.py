@@ -3,27 +3,36 @@ from odoo import models, fields, api
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
 
-    invoice_date_import = fields.Date(string="Fecha de Factura (importación)",
-                                      help="Usado solo en importación masiva para fijar la fecha de la factura.")
+    invoice_date_import = fields.Date(
+        string="Fecha de Factura (importación)",
+        help="Usado solo en importación masiva para fijar la fecha de la factura creada."
+    )
 
     @api.model
     def create(self, vals):
-        order = super().create(vals)
+        # Crear el pedido normalmente
+        sale_order = super().create(vals)
 
-        # Automatismos solo si viene desde el wizard de importación
+        # Automatismos solo cuando lo pide el contexto (desde el wizard)
         if self.env.context.get('auto_invoice_on_import'):
             # Confirmar la venta
-            order.action_confirm()
+            sale_order.action_confirm()
 
-            # Validar entregas incluso sin reservas: stock.immediate.transfer
-            for picking in order.picking_ids.filtered(lambda p: p.state not in ('done', 'cancel')):
-                picking.action_assign()
-                imt = self.env['stock.immediate.transfer'].create({'pick_ids': [(4, picking.id)]})
-                imt.process()
+            # Validar entregas: usar transferencia inmediata para evitar problemas de reservas
+            for picking in sale_order.picking_ids.filtered(lambda p: p.state not in ('done', 'cancel')):
+                # Intentar asignar y luego procesar transferencia inmediata
+                try:
+                    picking.action_assign()
+                except Exception:
+                    # Si falla la asignación, igual intentamos transferencia inmediata
+                    pass
+                imd = self.env['stock.immediate.transfer'].create({'pick_ids': [(4, picking.id)]})
+                imd.process()
 
             # Crear factura en borrador
-            invoice = order._create_invoices()
-            if invoice and order.invoice_date_import:
-                invoice.invoice_date = order.invoice_date_import
+            invoice = sale_order._create_invoices()
+            if invoice and sale_order.invoice_date_import:
+                # Fijar la fecha de factura si fue cargada
+                invoice.invoice_date = sale_order.invoice_date_import
 
-        return order
+        return sale_order
