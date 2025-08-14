@@ -41,13 +41,77 @@ class SaleImportWizard(models.TransientModel):
             return None
         return str(v).strip()
 
-    def _norm_journal_code(self, v):
-        s = self._norm_str(v)
-        if not s:
+def _norm_journal_code(self, v):
+    """Devuelve siempre un código de 5 dígitos ('00015'), tolerando entradas tipo 15, 15.0, '15,0', ' 015 ', etc."""
+    if self._is_na(v):
+        return None
+
+    # Casos numéricos puros (lo típico cuando Excel convierte a número)
+    if isinstance(v, int):
+        return f"{v:05d}"
+    if isinstance(v, float):
+        if math.isnan(v):
             return None
-        if s.isdigit():
-            return s.zfill(5)
-        return s
+        return f"{int(v):05d}"
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    # Aceptar formatos comunes: '15.0', '15,0', '1e1'
+    s2 = s.replace(',', '.')
+    try:
+        f = float(s2)
+        if float(f).is_integer():
+            return f"{int(f):05d}"
+    except Exception:
+        pass
+
+    # Si son dígitos puros, pad a 5
+    if s.isdigit():
+        return s.zfill(5)
+
+    # Extraer sólo dígitos (por si viene 'abc16' u otros ruidos)
+    digits = ''.join(ch for ch in s if ch.isdigit())
+    if digits:
+        # Si son <= 5 dígitos, pad a 5; si son más, devolvemos tal cual (no forzamos truncado).
+        return digits.zfill(5) if len(digits) <= 5 else digits
+
+    # Último recurso, devolver tal cual
+    return s
+
+    def _find_sale_journal(self, code, company):
+    """Busca el diario de ventas por code (con y sin ceros) y, si está l10n_ar, por l10n_ar_afip_pos_number."""
+    Journal = self.env['account.journal'].with_company(company.id)
+    code_norm = self._norm_journal_code(code)
+
+    # Intento 1: código normalizado (00015)
+    if code_norm:
+        j = Journal.search([('type', '=', 'sale'), ('code', '=', code_norm)], limit=1)
+        if j:
+            return j
+
+    # Intento 2: sin ceros a la izquierda (15)
+    if code_norm and code_norm.isdigit():
+        alt = code_norm.lstrip('0') or '0'
+        j = Journal.search([('type', '=', 'sale'), ('code', '=', alt)], limit=1)
+        if j:
+            return j
+
+    # Intento 3 (opcional l10n_ar): por número de PDV AFIP
+    digits = None
+    if code is not None:
+        s = str(code)
+        digits = ''.join(ch for ch in s if ch.isdigit())
+    if digits and 'l10n_ar_afip_pos_number' in Journal._fields:
+        try:
+            j = Journal.search([('type', '=', 'sale'), ('l10n_ar_afip_pos_number', '=', int(digits))], limit=1)
+            if j:
+                return j
+        except Exception:
+            pass
+
+    return Journal.browse(False)
 
     def _to_date(self, value):
         if self._is_na(value):
@@ -276,13 +340,11 @@ class SaleImportWizard(models.TransientModel):
                     invoice = sale_order.invoice_ids[:1]
                     if invoice:
                         if journal_code:
-                            Journal = self.env['account.journal'].with_company(company.id)
-                            j = Journal.search([('type', '=', 'sale'), ('code', '=', journal_code)], limit=1)
-                            if not j and journal_code.isdigit():
-                                alt = journal_code.lstrip('0') or journal_code
-                                j = Journal.search([('type', '=', 'sale'), ('code', '=', alt)], limit=1)
+                            j = self._find_sale_journal(journal_code, company)
                             if j:
                                 invoice.journal_id = j.id
+                            else:
+                                errors.append(f"{order_name}: No se encontró diario con código '{journal_code}' (normalizado: '{self._norm_journal_code(journal_code)}').")
                         if self.validate_invoice:
                             invoice.action_post()
                             posted_invoices |= invoice
