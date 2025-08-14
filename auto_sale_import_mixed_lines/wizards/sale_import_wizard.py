@@ -41,7 +41,7 @@ class SaleImportWizard(models.TransientModel):
             return None
         return str(v).strip()
 
-def _norm_journal_code(self, v):
+    def _norm_journal_code(self, v):
     """Devuelve siempre un código de 5 dígitos ('00015'), tolerando entradas tipo 15, 15.0, '15,0', ' 015 ', etc."""
     if self._is_na(v):
         return None
