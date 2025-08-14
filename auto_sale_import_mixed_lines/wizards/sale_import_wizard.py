@@ -260,97 +260,108 @@ class SaleImportWizard(models.TransientModel):
 
         posted_invoices = self.env['account.move']
         try:
-            with self.env.cr.savepoint():
-                for order_name, lines in grouped_orders.items():
-                    first = lines[0]
-                    company = self._get_company(first.get('__company_name__'))
-                    partner = self._get_partner(first.get('__partner_name__'), company)
-                    if not partner:
-                        errors.append(f"{order_name}: Cliente no encontrado por nombre/ref: {first.get('__partner_name__')}")
-                        continue
+            for order_name, lines in grouped_orders.items():
+                order_errors = []
+                try:
+                    with self.env.cr.savepoint():
+                        first = lines[0]
+                        company = self._get_company(first.get('__company_name__'))
+                        partner = self._get_partner(first.get('__partner_name__'), company)
+                        if not partner:
+                            order_errors.append(f"Cliente no encontrado por nombre/ref: {first.get('__partner_name__')}")
 
-                    journal_code = first.get('__journal_code__')
-                    order_lines = []
-                    iva_21 = self._get_tax_iva_21_sale(company)
+                        journal_code = first.get('__journal_code__')
+                        order_lines = []
+                        iva_21 = self._get_tax_iva_21_sale(company)
 
-                    for row in lines:
-                        qty = row.get('order_line/product_uom_qty') or 1.0
-                        try:
-                            qty = float(qty)
-                        except Exception:
-                            qty = 1.0
+                        for row in lines:
+                            qty = row.get('order_line/product_uom_qty') or 1.0
+                            try:
+                                qty = float(qty)
+                            except Exception:
+                                qty = 1.0
 
-                        price_unit = row.get('order_line/price_unit')
-                        try:
-                            price_unit = float(price_unit) if price_unit is not None else None
-                        except Exception:
-                            price_unit = None
+                            price_unit = row.get('order_line/price_unit')
+                            try:
+                                price_unit = float(price_unit) if price_unit is not None else None
+                            except Exception:
+                                price_unit = None
 
-                        default_code = self._norm_str(row.get('default_code') or row.get('order_line/product_id/default_code'))
-                        desc = self._norm_str(row.get('order_line/product_id/name'))
+                            default_code = self._norm_str(row.get('default_code') or row.get('order_line/product_id/default_code'))
+                            desc = self._norm_str(row.get('order_line/product_id/name'))
 
-                        if default_code:
-                            Product = self.env['product.product'].with_company(company.id)
-                            product = Product.search([
-                                ('default_code', '=', default_code),
-                                '|', ('company_id', '=', company.id), ('company_id', '=', False),
-                            ], limit=1)
+                            if default_code:
+                                Product = self.env['product.product'].with_company(company.id)
+                                product = Product.search([
+                                    ('default_code', '=', default_code),
+                                    '|', ('company_id', '=', company.id), ('company_id', '=', False),
+                                ], limit=1)
 
-                            if not product:
-                                errors.append(f"{order_name}: Producto no encontrado - código: {default_code}")
-                                continue
-                            line_vals = {'product_id': product.id, 'product_uom_qty': qty}
-                            if price_unit is not None:
-                                line_vals['price_unit'] = price_unit
+                                if not product:
+                                    order_errors.append(f"Producto no encontrado - código: {default_code}")
+                                    continue
+                                line_vals = {'product_id': product.id, 'product_uom_qty': qty}
+                                if price_unit is not None:
+                                    line_vals['price_unit'] = price_unit
+                                else:
+                                    line_vals['price_unit'] = self._price_for_product(product, qty, partner)
                             else:
-                                line_vals['price_unit'] = self._price_for_product(product, qty, partner)
-                        else:
-                            if not self.service_product_id:
-                                errors.append(f"{order_name}: Línea sin default_code requiere 'Producto servicio (líneas libres)'.")
-                                continue
-                            if not desc:
-                                errors.append(f"{order_name}: Línea personalizada sin descripción.")
-                                continue
-                            if price_unit is None:
-                                errors.append(f"{order_name}: Línea personalizada sin price_unit.")
-                                continue
-                            line_vals = {
-                                'product_id': self.service_product_id.id,
-                                'name': desc,
-                                'product_uom_qty': qty,
-                                'price_unit': price_unit,
-                                'tax_id': [(6, 0, [iva_21.id])] if iva_21 else [],
-                            }
-                        order_lines.append((0, 0, line_vals))
+                                if not self.service_product_id:
+                                    order_errors.append("Línea sin default_code requiere 'Producto servicio (líneas libres)'.")
+                                    continue
+                                if not desc:
+                                    order_errors.append("Línea personalizada sin descripción.")
+                                    continue
+                                if price_unit is None:
+                                    order_errors.append("Línea personalizada sin price_unit.")
+                                    continue
+                                line_vals = {
+                                    'product_id': self.service_product_id.id,
+                                    'name': desc,
+                                    'product_uom_qty': qty,
+                                    'price_unit': price_unit,
+                                    'tax_id': [(6, 0, [iva_21.id])] if iva_21 else [],
+                                }
+                            order_lines.append((0, 0, line_vals))
 
-                    if not order_lines:
-                        errors.append(f"{order_name}: No se agregaron líneas válidas.")
-                        continue
+                        if not order_lines and not order_errors:
+                            order_errors.append("No se agregaron líneas válidas.")
 
-                    order_vals = {
-                        'name': str(order_name),
-                        'partner_id': partner.id,
-                        'company_id': company.id,
-                        'date_order': self._to_date(first.get('date_order')),
-                        'invoice_date_import': self._to_date(first.get('invoice_date_import')),
-                        'order_line': order_lines,
-                    }
-                    sale_order = self.env['sale.order'].with_context(auto_invoice_on_import=True).create(order_vals)
+                        if order_errors:
+                            raise UserError("\n- ".join([f"{order_name}: {msg}" for msg in order_errors]))
 
-                    invoice = sale_order.invoice_ids[:1]
-                    if invoice:
-                        if journal_code:
-                            j = self._find_sale_journal(journal_code, company)
-                            if j:
-                                invoice.journal_id = j.id
-                            else:
-                                errors.append(f"{order_name}: No se encontró diario con código '{journal_code}' (normalizado: '{self._norm_journal_code(journal_code)}').")
-                        if self.validate_invoice:
-                            invoice.action_post()
-                            posted_invoices |= invoice
+                        order_vals = {
+                            'name': str(order_name),
+                            'partner_id': partner.id,
+                            'company_id': company.id,
+                            'date_order': self._to_date(first.get('date_order')),
+                            'invoice_date_import': self._to_date(first.get('invoice_date_import')),
+                            'order_line': order_lines,
+                        }
+                        sale_order = self.env['sale.order'].with_context(auto_invoice_on_import=True).create(order_vals)
 
-                if errors and self.cancel_all_on_errors:
-                    raise UserError("Se detectaron errores y se canceló toda la importación:\n- " + "\n- ".join(errors))
+                        for invoice in sale_order.invoice_ids:
+                            if journal_code:
+                                j = self._find_sale_journal(journal_code, company)
+                                if j:
+                                    invoice.journal_id = j.id
+                                else:
+                                    raise UserError(f"{order_name}: No se encontró diario con código '{journal_code}' (normalizado: '{self._norm_journal_code(journal_code)}').")
+                            if self.validate_invoice:
+                                invoice.action_post()
+                                posted_invoices |= invoice
+
+                except UserError as e:
+                    errors.append(str(e))
+                    if self.cancel_all_on_errors:
+                        raise
+                except Exception as e:
+                    errors.append(f"{order_name}: {str(e)}")
+                    if self.cancel_all_on_errors:
+                        raise
+
+            if errors and self.cancel_all_on_errors:
+                raise UserError("Se detectaron errores y se canceló toda la importación:\n- " + "\n- ".join(errors))
 
         except UserError as ue:
             summary.append(str(ue))
