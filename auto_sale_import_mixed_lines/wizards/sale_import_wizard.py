@@ -41,7 +41,7 @@ class SaleImportWizard(models.TransientModel):
             return None
         return str(v).strip()
 
-def _norm_journal_code(self, v):
+    def _norm_journal_code(self, v):
     """Devuelve siempre un código de 5 dígitos ('00015'), tolerando entradas tipo 15, 15.0, '15,0', ' 015 ', etc."""
     if self._is_na(v):
         return None
@@ -80,7 +80,7 @@ def _norm_journal_code(self, v):
     # Último recurso, devolver tal cual
     return s
 
-def _find_sale_journal(self, code, company):
+    def _find_sale_journal(self, code, company):
     """Busca el diario de ventas por code (con y sin ceros) y, si está l10n_ar, por l10n_ar_afip_pos_number."""
     Journal = self.env['account.journal'].with_company(company.id)
     code_norm = self._norm_journal_code(code)
