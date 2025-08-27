@@ -4,6 +4,7 @@ import base64, math
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
+import io, zipfile
 
 class SaleImportWizard(models.TransientModel):
     _name = 'sale.import.wizard'
@@ -412,7 +413,26 @@ class SaleImportWizard(models.TransientModel):
 
         if self.validate_invoice and posted_invoices:
             report = self._get_invoice_report_action()
-            return report.report_action(posted_invoices)
+            if len(posted_invoices) == 1:
+                return report.report_action(posted_invoices)
+            pdf_zip = io.BytesIO()
+            with zipfile.ZipFile(pdf_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for inv in posted_invoices:
+                    pdf, _ = report._render_qweb_pdf(inv.id)
+                    pdf_name = inv._get_report_base_filename() + '.pdf'
+                    zf.writestr(pdf_name, pdf)
+            pdf_zip.seek(0)
+            attachment = self.env['ir.attachment'].create({
+                'name': 'invoices.zip',
+                'type': 'binary',
+                'datas': base64.b64encode(pdf_zip.read()),
+                'mimetype': 'application/zip',
+            })
+            return {
+                'type': 'ir.actions.act_url',
+                'url': f'/web/content/{attachment.id}?download=true',
+                'target': 'self',
+            }
 
         if errors:
             summary.append("Errores detectados:")
