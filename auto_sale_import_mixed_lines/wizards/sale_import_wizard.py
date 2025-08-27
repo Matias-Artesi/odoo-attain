@@ -39,6 +39,18 @@ class SaleImportWizard(models.TransientModel):
     def _norm_str(self, v):
         if self._is_na(v):
             return None
+        # Cuando pandas lee columnas que parecen numéricas, usualmente las
+        # convierte a `float`.  Para códigos como default_code queremos
+        # preservar el valor original sin el sufijo ".0" que agrega al
+        # representarlo como string.  Por eso, si el valor es numérico y es un
+        # entero, lo transformamos explícitamente a `int` antes de convertirlo
+        # a texto.
+        if isinstance(v, float):
+            if v.is_integer():
+                return str(int(v))
+            return str(v).strip()
+        if isinstance(v, int):
+            return str(v)
         return str(v).strip()
 
     def _norm_journal_code(self, v):
