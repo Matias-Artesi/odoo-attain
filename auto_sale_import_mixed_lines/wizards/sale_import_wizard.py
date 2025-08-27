@@ -188,13 +188,21 @@ class SaleImportWizard(models.TransientModel):
         return product.lst_price
 
     def _get_invoice_report_action(self):
-        candidates = ['account.report_invoice','account.account_invoices','l10n_ar.report_invoice_document']
+        candidates = [
+            'account.account_invoices',
+            'l10n_ar.report_invoice_document',
+            'account.report_invoice',
+        ]
         for xmlid in candidates:
             try:
-                return self.env.ref(xmlid)
+                record = self.env.ref(xmlid)
             except ValueError:
                 continue
-        raise UserError("No se encontró un reporte de facturas válido (account.report_invoice / account.account_invoices).")
+            if record._name == 'ir.actions.report':
+                return record
+        raise UserError(
+            "No se encontró un reporte de facturas válido (%s)." % " / ".join(candidates)
+        )
 
     def action_import_sales(self):
         self.ensure_one()
