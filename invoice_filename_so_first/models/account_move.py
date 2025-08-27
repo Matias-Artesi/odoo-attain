@@ -38,8 +38,8 @@ class AccountMove(models.Model):
         origin_part = self._sanitize_filename_part(origin)
         inv_part = self._sanitize_filename_part(inv_name) or f"INV-{self.id}"
 
-        # Apply prefix only to customer invoices/refunds
-        if self.move_type in ('out_invoice', 'out_refund') and origin_part:
+        # Apply prefix when an origin is present for supported move types
+        if self.move_type in ('out_invoice', 'out_refund', 'in_invoice', 'in_refund') and origin_part:
             base = f"{origin_part}-{inv_part}"
         else:
             base = inv_part
@@ -50,7 +50,7 @@ class AccountMove(models.Model):
     # --- hook used by ir.actions.report ---
     def _get_report_base_filename(self):
         self.ensure_one()
-        if self.move_type in ('out_invoice', 'out_refund'):
+        if self.move_type in ('out_invoice', 'out_refund', 'in_invoice', 'in_refund'):
             return self._compose_invoice_filename()
         return super()._get_report_base_filename()
 
