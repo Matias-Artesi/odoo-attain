@@ -274,6 +274,7 @@ class SaleImportWizard(models.TransientModel):
         try:
             for order_name, lines in grouped_orders.items():
                 order_errors = []
+                invoices_to_post = self.env['account.move']
                 try:
                     with self.env.cr.savepoint():
                         first = lines[0]
@@ -358,10 +359,10 @@ class SaleImportWizard(models.TransientModel):
                                 if j:
                                     invoice.journal_id = j.id
                                 else:
-                                    raise UserError(f"{order_name}: No se encontró diario con código '{journal_code}' (normalizado: '{self._norm_journal_code(journal_code)}').")
-                            if self.validate_invoice:
-                                invoice.action_post()
-                                posted_invoices |= invoice
+                                    raise UserError(
+                                        f"{order_name}: No se encontró diario con código '{journal_code}' (normalizado: '{self._norm_journal_code(journal_code)}')."
+                                    )
+                            invoices_to_post |= invoice
 
                 except UserError as e:
                     errors.append(str(e))
@@ -371,6 +372,11 @@ class SaleImportWizard(models.TransientModel):
                     errors.append(f"{order_name}: {str(e)}")
                     if self.cancel_all_on_errors:
                         raise
+                else:
+                    if self.validate_invoice:
+                        for invoice in invoices_to_post:
+                            invoice.action_post()
+                            posted_invoices |= invoice
 
             if errors and self.cancel_all_on_errors:
                 raise UserError("Se detectaron errores y se canceló toda la importación:\n- " + "\n- ".join(errors))
